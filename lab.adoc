@@ -1,0 +1,204 @@
+= Kafka Lab
+
+== Preparation
+
+Download https://www.apache.org/dyn/closer.cgi?path=/kafka/0.10.1.0/kafka_2.11-0.10.1.0.tgz[kafka]
+
+1. Start zookeeper
++
+[source,bash]
+----
+bin/zookeeper-server-start.sh config/zookeeper.properties
+----
++
+TIP: Window scripts are located at `bin\windows\*.bat`
+
+
+1. Start kafka server from a different terminal window
++
+[source,bash]
+----
+bin/kafka-server-start.sh config/server.properties
+----
+
+1. Create topic
++
+[source,bash]
+----
+bin/kafka-topics.sh --create \
+  --zookeeper localhost:2181 \
+  --replication-factor 1   \
+  --partitions 1       \
+  --topic test
+----
+
+1. Send some messages
++
+[source,bash]
+----
+bin/kafka-console-producer.sh --broker-list localhost:9092 --topic test
+Helloworld
+Helloworld2
+^C
+----
+
+1. Read the messages
++
+[source,bash]
+----
+bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic test --from-beginning
+----
+
+== Developing a producer
+
+Get the https://start.spring.io/starter.zip?dependencies=cloud-stream-binder-kafka&groupId=io.pivotal.edu&artifactId=kafka-producer&name=Producer&packageName=io.pivotal.edu[skeleton project]
+
+Change the `ProducerApplication` class
+
+[source,java]
+----
+@SpringBootApplication
+public class ProducerApplication {
+    private static final Logger logger =
+            LoggerFactory.getLogger(ProducerApplication.class);
+
+    public static void main(String[] args) {
+
+        new SpringApplicationBuilder(ProducerApplication.class)
+                .web(false)
+                .application()
+                .run(args);
+    }
+
+    @Bean
+    ApplicationRunner produce() {
+        return args -> {
+
+            Properties props = new Properties();
+            props.put("bootstrap.servers", "localhost:9092");
+
+            try (Producer<String, String> producer = new KafkaProducer<>(props,
+                    new StringSerializer(),
+                    new StringSerializer())) {
+
+                Future<RecordMetadata> result = producer.send(new ProducerRecord<>(
+                        "test",
+                        "Helloworld from producer " + new Date()));
+
+                RecordMetadata meta = result.get();
+
+                logger.info("RecordMetadata[offset: {}, partition: {}]",
+                        meta.offset(),
+                        meta.partition());
+            }
+        };
+    }
+}
+----
+
+Now run the application, while keeping the consumer running in background
+
+Expecting to see the `helloworld from producer` message printed from the consumer terminal
+
+```
+$ bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic test
+Helloworld from producer Wed Dec 14 12:24:29 SGT 2016
+Helloworld from producer Wed Dec 14 12:32:09 SGT 2016
+Helloworld from producer Wed Dec 14 12:32:13 SGT 2016
+```
+
+=== Use KafkaTemplate
+
+[source,java]
+----
+@Bean
+ApplicationRunner withTemplate() {
+    return args -> {
+        KafkaTemplate<String, String> template = new KafkaTemplate<>(
+                new DefaultKafkaProducerFactory<String, String>(
+                        kafkaConfig()
+                ));
+
+        template.setDefaultTopic("test");
+
+        template.sendDefault("helloworld from KafkaTemplate " + new Date());
+
+        template.flush();
+    };
+}
+
+Map<String, Object> kafkaConfig() {
+    Map<String, Object> props = new HashMap<>();
+    props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+    props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+    props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+    return props;
+}
+----
+
+
+== Developing Consumer
+
+Get the https://start.spring.io/starter.zip?dependencies=cloud-stream-binder-kafka&groupId=io.pivotal.edu&artifactId=kafka-consumer&name=Consumer&packageName=io.pivotal.edu[skeleton project]
+
+
+[source,java]
+----
+@Bean
+ApplicationRunner runner() {
+  return args -> {
+        Properties prop = new Properties();
+        prop.setProperty("bootstrap.servers", "localhost:9092");
+        prop.setProperty("group.id", UUID.randomUUID().toString());
+        prop.setProperty("key.deserializer", StringDeserializer.class.getName());
+        prop.setProperty("value.deserializer", StringDeserializer.class.getName());
+
+        KafkaConsumer<String, String> consumer = new KafkaConsumer<>(prop);
+
+        consumer.subscribe(Arrays.asList("test"));
+
+        while (true) {
+            ConsumerRecords<String, String> records = consumer.poll(1000);
+            logger.info("ConsumerRecords: {}", records.count());
+
+            records.forEach(r -> logger.info("{}", r));
+        }
+    };
+}
+----
+
+=== Use @KafkaListener
+
+[source,java]
+----
+
+    @KafkaListener(topics = "test")
+    public void process(String message) {
+        System.out.println(message);
+    }
+
+    @Bean
+    KafkaListenerContainerFactory<?> kafkaListenerContainerFactory() {
+        ConcurrentKafkaListenerContainerFactory<String, String> factory =
+                new ConcurrentKafkaListenerContainerFactory<>();
+        factory.setConsumerFactory(consumerFactory());
+        factory.setConcurrency(3);
+        factory.getContainerProperties().setPollTimeout(3000);
+        return factory;
+    }
+
+    @Bean
+    public ConsumerFactory<String, String> consumerFactory() {
+        return new DefaultKafkaConsumerFactory<>(consumerConfigs());
+    }
+
+    @Bean
+    public Map<String, Object> consumerConfigs() {
+        Map<String, Object> props = new HashMap<>();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, UUID.randomUUID().toString());
+        return props;
+    }
+----
